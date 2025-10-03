@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 # A secret token to ensure only your PHP script can send logs.
 # For better security, you could set this as an environment variable on Render.
-SECRET_TOKEN = "NYXVJcB4xFk-ZG7QeBY-4S9A8TdM5zwvYhUKkB10kLU5bBaYbgEieLVRUEuBifHE"
+SECRET_TOKEN = "your-very-secret-and-long-random-string"
 
 CONNECTED_CLIENTS: set[web.WebSocketResponse] = set()
 
@@ -57,9 +57,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     logging.info("Desktop client connected: %s (total %d)", request.remote, len(CONNECTED_CLIENTS) + 1)
     CONNECTED_CLIENTS.add(ws)
     try:
-        # We just keep the connection open. This handler doesn't expect to receive messages from the desktop app.
-        while not ws.closed:
-            await asyncio.sleep(1)
+        # This loop is crucial. It listens for messages from the client.
+        # While the desktop app doesn't send log data, this loop allows the
+        # aiohttp framework to properly handle control frames like pings and pongs.
+        async for msg in ws:
+            # We don't expect any specific messages, so we just continue.
+            pass
     finally:
         CONNECTED_CLIENTS.discard(ws)
         logging.info("Desktop client disconnected: %s (total %d)", request.remote, len(CONNECTED_CLIENTS))
