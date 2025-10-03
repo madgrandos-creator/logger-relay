@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 # A secret token to ensure only your PHP script can send logs.
 # For better security, you could set this as an environment variable on Render.
-SECRET_TOKEN = "your-very-secret-and-long-random-string"
+SECRET_TOKEN = "NYXVJcB4xFk-ZG7QeBY-4S9A8TdM5zwvYhUKkB10kLU5bBaYbgEieLVRUEuBifHE"
 
 CONNECTED_CLIENTS: set[web.WebSocketResponse] = set()
 
@@ -109,3 +109,4 @@ if __name__ == "__main__":
     logging.info("Starting relay server on %s:%d", host, port)
     app = create_app()
     web.run_app(app, host=host, port=port)
+
