@@ -1,1 +1,4 @@
-websockets
+aiohttp>=3.8,<4
+python-dotenv
+# optional
+uvloop ; sys_platform != "win32"
