@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """
-relay_server.py - aiohttp-based WebSocket relay that safely handles Render health checks.
-
-Dependencies:
-  pip install aiohttp
-
-Usage on Render:
-  - Start command: python3 relay_server.py
-  - Ensure the service's PORT env var (Render sets it automatically).
-  - Optionally set Render health check path to "/" (default) or "/health".
+relay_server.py - aiohttp-based WebSocket relay that safely handles Render health checks
+and accepts POST requests from a PHP sender.
 """
 
 import os
@@ -17,15 +10,30 @@ import logging
 import json
 from aiohttp import web, WSMsgType
 
+# --- UVLoop Optimization ---
+# Try to install uvloop for a performance boost on Linux servers like Render.
+try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    logging.info("Using uvloop for asyncio event loop.")
+except ImportError:
+    logging.info("uvloop not found, using standard asyncio event loop.")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# Keep track of connected WebSocketResponse objects
+# A secret token to ensure only your PHP script can send logs.
+# For better security, you could set this as an environment variable on Render.
+SECRET_TOKEN = "NYXVJcB4xFk-ZG7QeBY-4S9A8TdM5zwvYhUKkB10kLU5bBaYbgEieLVRUEuBifHE"
+
 CONNECTED_CLIENTS: set[web.WebSocketResponse] = set()
 
 async def broadcast(message: str | bytes):
     """Send a message to all connected clients; remove dead ones."""
     if not CONNECTED_CLIENTS:
+        logging.info("Broadcast received, but no clients are connected.")
         return
+    
+    logging.info(f"Broadcasting message to {len(CONNECTED_CLIENTS)} clients.")
     to_remove = []
     for ws in list(CONNECTED_CLIENTS):
         if ws.closed:
@@ -43,74 +51,58 @@ async def broadcast(message: str | bytes):
         CONNECTED_CLIENTS.discard(ws)
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
-    """
-    Accept and handle a single websocket connection. This function
-    returns the WebSocketResponse to aiohttp.
-    """
+    """Handles incoming WebSocket connections from the desktop app."""
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
-
-    logging.info("Client connected: %s (total %d)", request.remote, len(CONNECTED_CLIENTS) + 1)
+    logging.info("Desktop client connected: %s (total %d)", request.remote, len(CONNECTED_CLIENTS) + 1)
     CONNECTED_CLIENTS.add(ws)
-
     try:
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                # you can validate/transform the message here if needed
-                logging.debug("Received text message from %s: %s", request.remote, msg.data)
-                await broadcast(msg.data)
-            elif msg.type == WSMsgType.BINARY:
-                logging.debug("Received binary message from %s (%d bytes)", request.remote, len(msg.data))
-                await broadcast(msg.data)
-            elif msg.type == WSMsgType.ERROR:
-                logging.warning("WS connection error from %s: %s", request.remote, ws.exception())
+        # We just keep the connection open. This handler doesn't expect to receive messages from the desktop app.
+        while not ws.closed:
+            await asyncio.sleep(1)
     finally:
         CONNECTED_CLIENTS.discard(ws)
-        logging.info("Client disconnected: %s (total %d)", request.remote, len(CONNECTED_CLIENTS))
+        logging.info("Desktop client disconnected: %s (total %d)", request.remote, len(CONNECTED_CLIENTS))
         await ws.close()
     return ws
 
-# Health check handler (responds 200 OK for HEAD and non-upgrade GETs)
-async def root_handler(request: web.Request):
-    # If this is a GET and a websocket upgrade is requested, perform WS handshake
-    upgrade_hdr = request.headers.get("Upgrade", "")
-    if request.method == "GET" and "websocket" in upgrade_hdr.lower():
-        return await websocket_handler(request)
+# --- NEW: Handler for receiving logs from PHP via POST ---
+async def log_receiver_handler(request: web.Request):
+    """Accepts POST requests from the PHP script and broadcasts the data."""
+    # Security Check: Ensure the request includes the correct secret token.
+    if request.headers.get("X-Auth-Token") != SECRET_TOKEN:
+        logging.warning("Unauthorized log attempt from IP: %s", request.remote)
+        return web.Response(status=403, text="Forbidden")
 
-    # Otherwise treat as a health check / normal HTTP request
-    # HEAD requests will automatically receive the same status without body.
-    logging.debug("Health check from %s (%s %s)", request.remote, request.method, request.path)
+    try:
+        log_data = await request.json()
+        log_json = json.dumps(log_data)
+        await broadcast(log_json)
+        return web.Response(text="OK")
+    except json.JSONDecodeError:
+        return web.Response(status=400, text="Bad Request: Invalid JSON")
+    except Exception as e:
+        logging.error("Error in log_receiver_handler: %s", e)
+        return web.Response(status=500, text="Internal Server Error")
+
+
+async def health_check_handler(request: web.Request):
+    """Handles Render's health checks."""
     return web.Response(text="OK")
-
-# Explicit websocket path
-async def ws_path_handler(request: web.Request):
-    return await websocket_handler(request)
-
-async def on_shutdown(app):
-    logging.info("Shutting down: closing %d websockets", len(CONNECTED_CLIENTS))
-    tasks = []
-    for ws in list(CONNECTED_CLIENTS):
-        tasks.append(ws.close(code=1001, message=b"server shutdown"))
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    CONNECTED_CLIENTS.clear()
 
 def create_app():
     app = web.Application()
-    # Root accepts health checks and websocket upgrades.
-    app.router.add_route("GET", "/", root_handler)
-    app.router.add_route("HEAD", "/", root_handler)
-    # Explicit websocket endpoint (for clients that expect /ws)
-    app.router.add_route("GET", "/ws", ws_path_handler)
-    # Add shutdown cleanup
-    app.on_shutdown.append(on_shutdown)
+    # Endpoint for the desktop app to connect to
+    app.router.add_route("GET", "/", websocket_handler)
+    # Endpoint for the PHP script to send data to
+    app.router.add_route("POST", "/log", log_receiver_handler)
+    # Endpoint for Render's health checks
+    app.router.add_route("HEAD", "/health", health_check_handler)
     return app
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", os.environ.get("RENDER_PORT", 8765)))
+    port = int(os.environ.get("PORT", 8765))
     host = "0.0.0.0"
-
     logging.info("Starting relay server on %s:%d", host, port)
     app = create_app()
-    # web.run_app handles signals and graceful shutdown on Render
     web.run_app(app, host=host, port=port)
